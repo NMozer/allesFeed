@@ -1,6 +1,6 @@
 // supabase/functions/voice_parser/index.ts
-// TaskFeed Voice Parser – Transkript → strukturiertes Task-Objekt (mit echtem Gemini-Call)
-// Version 1.1
+// TaskFeed Voice Parser – Transkript → strukturiertes Task-Objekt
+// Version 1.2 – Lovable AI Gateway
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 
@@ -51,59 +51,59 @@ serve(async (req) => {
     }
 
     const currentDate = new Date().toISOString().split("T")[0];
-    const fullPrompt = SYSTEM_PROMPT.replace("{CURRENT_DATE}", currentDate) + `\n\nTranskript: "${transcript}"`;
 
-    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    if (!GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY environment variable is not set");
+    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    if (!LOVABLE_API_KEY) {
+      throw new Error("LOVABLE_API_KEY environment variable is not set");
     }
 
-    // === Echter Gemini API Call ===
-    const geminiResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [{ text: fullPrompt }],
-            },
-          ],
-          generationConfig: {
-            response_mime_type: "application/json",
-            temperature: 0.2,
-            maxOutputTokens: 500,
+    // === Lovable AI Gateway Call ===
+    const lovableResponse = await fetch("https://api.lovable.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${LOVABLE_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gemini-3-flash-preview",
+        messages: [
+          {
+            role: "system",
+            content: SYSTEM_PROMPT.replace("{CURRENT_DATE}", currentDate),
           },
-        }),
-      }
-    );
+          {
+            role: "user",
+            content: transcript,
+          },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+        max_tokens: 500,
+      }),
+    });
 
-    if (!geminiResponse.ok) {
-      const errorText = await geminiResponse.text();
-      throw new Error(`Gemini API error: ${geminiResponse.status} - ${errorText}`);
+    if (!lovableResponse.ok) {
+      const errorText = await lovableResponse.text();
+      throw new Error(`Lovable AI error: ${lovableResponse.status} - ${errorText}`);
     }
 
-    const geminiData = await geminiResponse.json();
-    const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+    const lovableData = await lovableResponse.json();
+    const rawContent = lovableData.choices?.[0]?.message?.content;
 
-    if (!rawText) {
-      throw new Error("No response from Gemini");
+    if (!rawContent) {
+      throw new Error("No response from Lovable AI Gateway");
     }
 
-    // Parse the JSON response from Gemini
+    // Parse JSON
     let parsedTask;
     try {
-      parsedTask = JSON.parse(rawText);
+      parsedTask = JSON.parse(rawContent);
     } catch (parseError) {
-      // Fallback: try to extract JSON from text
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         parsedTask = JSON.parse(jsonMatch[0]);
       } else {
-        throw new Error("Failed to parse JSON from Gemini response");
+        throw new Error("Failed to parse JSON from Lovable response");
       }
     }
 
@@ -112,7 +112,7 @@ serve(async (req) => {
         success: true,
         parsed_task: parsedTask,
         original_transcript: transcript,
-        model: "gemini-2.5-flash",
+        model: "gemini-3-flash-preview (via Lovable AI Gateway)",
       }),
       {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
