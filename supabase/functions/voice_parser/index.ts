@@ -1,6 +1,6 @@
 // supabase/functions/voice_parser/index.ts
-// TaskFeed Voice Parser – Transkript → strukturiertes Task-Objekt
-// Version 1.0
+// TaskFeed Voice Parser – Transkript → strukturiertes Task-Objekt (mit echtem Gemini-Call)
+// Version 1.1
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 
@@ -29,13 +29,10 @@ Ausgabe-Schema (genau einhalten):
   "confidence": 0.0 bis 1.0
 }
 
-Beispiele:
-Input: "Morgen 10 Uhr Felix anrufen wegen Angebot"
-Output: { "title": "Felix anrufen wegen Angebot", "due": "2026-05-09T10:00:00", "priority": "medium", "tags": ["Anruf"], "notes": null, "confidence": 0.95 }
-
 Wichtige Hinweise:
-- "Morgen", "nächste Woche" → berechne korrektes Datum (heutiges Datum wird mitgegeben)
-- "Dringend", "wichtig" → priority = high
+- "Morgen", "nächste Woche", "übermorgen" → berechne das korrekte Datum (heutiges Datum wird mitgegeben)
+- "Dringend", "wichtig", "asap" → priority = high
+- "Mal schauen", "irgendwann" → priority = low
 - Extrahiere immer ein klares Verb am Anfang des Titels`;
 
 serve(async (req) => {
@@ -44,7 +41,7 @@ serve(async (req) => {
   }
 
   try {
-    const { transcript, userId } = await req.json();
+    const { transcript } = await req.json();
 
     if (!transcript) {
       return new Response(JSON.stringify({ error: "transcript is required" }), {
@@ -54,39 +51,68 @@ serve(async (req) => {
     }
 
     const currentDate = new Date().toISOString().split("T")[0];
+    const fullPrompt = SYSTEM_PROMPT.replace("{CURRENT_DATE}", currentDate) + `\n\nTranskript: "${transcript}"`;
 
-    // Hier später: Aufruf an Lovable AI Gateway oder Gemini
-    // Für jetzt simulieren wir die Antwort (später durch echten LLM-Call ersetzen)
+    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+    if (!GEMINI_API_KEY) {
+      throw new Error("GEMINI_API_KEY environment variable is not set");
+    }
 
-    // === TEMPORÄRER MOCK (später durch echten LLM ersetzen) ===
-    const mockParsed = {
-      title: transcript.length > 60 ? transcript.substring(0, 57) + "..." : transcript,
-      due: null,
-      priority: "medium",
-      tags: [],
-      notes: null,
-      confidence: 0.75,
-    };
+    // === Echter Gemini API Call ===
+    const geminiResponse = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [{ text: fullPrompt }],
+            },
+          ],
+          generationConfig: {
+            response_mime_type: "application/json",
+            temperature: 0.2,
+            maxOutputTokens: 500,
+          },
+        }),
+      }
+    );
 
-    // Später hier den echten Prompt + LLM-Call einfügen:
-    /*
-    const response = await fetch("https://lovable.ai/api/chat", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${Deno.env.get("LOVABLE_API_KEY")}` },
-      body: JSON.stringify({
-        system: SYSTEM_PROMPT.replace("{CURRENT_DATE}", currentDate),
-        user: transcript,
-        response_format: { type: "json_object" }
-      })
-    });
-    const parsed = await response.json();
-    */
+    if (!geminiResponse.ok) {
+      const errorText = await geminiResponse.text();
+      throw new Error(`Gemini API error: ${geminiResponse.status} - ${errorText}`);
+    }
+
+    const geminiData = await geminiResponse.json();
+    const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!rawText) {
+      throw new Error("No response from Gemini");
+    }
+
+    // Parse the JSON response from Gemini
+    let parsedTask;
+    try {
+      parsedTask = JSON.parse(rawText);
+    } catch (parseError) {
+      // Fallback: try to extract JSON from text
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        parsedTask = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error("Failed to parse JSON from Gemini response");
+      }
+    }
 
     return new Response(
       JSON.stringify({
         success: true,
-        parsed_task: mockParsed,
+        parsed_task: parsedTask,
         original_transcript: transcript,
+        model: "gemini-2.5-flash",
       }),
       {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -94,9 +120,16 @@ serve(async (req) => {
       }
     );
   } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    console.error("[VoiceParser] Error:", error);
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: error.message,
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      }
+    );
   }
 });
